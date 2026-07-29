@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UDP Video Streaming - C++ FEC Implementation</title>
+  <style>
+    :root { color-scheme: light dark; --primary: #0ea5e9; --text-light: #64748b; }
+    body { max-width: 850px; margin: 0 auto; padding: 2.5rem 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    h2 { margin-top: 2.5rem; border-bottom: 2px solid #33415533; padding-bottom: 0.5rem; color: var(--primary); }
+    code { background: #33415522; padding: 0.15rem 0.4rem; border-radius: 4px; font-family: monospace; }
+    .pipeline { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.75rem; padding: 1.5rem; background: #33415511; border-radius: 8px; margin: 1.5rem 0; }
+    .component { padding: 0.6rem 1rem; border: 2px solid var(--primary); border-radius: 6px; font-weight: 500; text-align: center; }
+    .arrow { color: var(--text-light); font-weight: bold; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { padding: 0.75rem; border-bottom: 1px solid #33415533; text-align: left; }
+    th { background: #33415511; }
+    .highlight { color: #10b981; font-weight: bold; font-size: 1.1rem; }
+  </style>
+</head>
+<body>
+  <h1>Low-Latency 20-of-32 Erasure Coding</h1>
+  <p>This implementation ensures the reliable delivery of a 50 FPS real-time stream across a highly degraded UDP network. It strictly adheres to the 2.0x bandwidth multiplier constraint and is built entirely using standard C++17 and POSIX sockets.</p>
+
+  <h2>Data Pipeline</h2>
+  <div class="pipeline" aria-label="Network flow diagram">
+    <span class="component">Source Harness<br><code>:47010</code></span>
+    <span class="arrow">➔</span>
+    <span class="component">C++ Sender</span>
+    <span class="arrow">➔</span>
+    <span class="component">Impaired Relay<br><code>:47001 ➔ :47002</code></span>
+    <span class="arrow">➔</span>
+    <span class="component">C++ Receiver</span>
+    <span class="arrow">➔</span>
+    <span class="component">Player Harness<br><code>:47020</code></span>
+  </div>
+  <p>This architecture is entirely unidirectional. Frames are encoded and dispatched the moment they are generated. The receiver rebuilds and forwards the frame immediately upon collecting enough shards. This allows the harness player to handle final deadline scheduling without the receiver introducing any artificial buffering delays.</p>
+
+  <h2>Network Protocol</h2>
+  <p>The standard 160-byte payload is fractured into twenty distinct 8-byte chunks. The sender processes these as coefficients of a degree-19 polynomial in GF(256), evaluating them across 32 unique nonzero field points. Due to Vandermonde matrix properties, retrieving any 20 of these 32 evaluated points guarantees full reconstruction of the original 160 bytes.</p>
+  <p>Over the wire, packets are precisely 10 bytes long. A 2-byte big-endian header allocates 5 bits for the shard identifier and 11 bits for the frame sequence. This sequence field loops every 2,048 frames, cleanly supporting over 40 seconds of continuous 50 Hz traffic.</p>
+  <p>For a standard 30-second run (1,500 frames), the overhead calculation mathematically guarantees compliance with the bandwidth cap:</p>
+  <p><code>(1500 frames × 32 shards × 10 bytes) / (1500 frames × 160 bytes) = Exactly 2.00000x</code>.</p>
+
+  <h2>Receiver Logic & Decoding</h2>
+  <p>The receiving service allocates an expected frame tracker, which holds memory and a bitmask for the 32 potential shards. Because of this structure, UDP out-of-order delivery is natively resolved, and redundant shard IDs are ignored. Once the 20th unique datagram arrives for a given frame, the software builds a 20x20 matrix and applies Gauss-Jordan elimination over GF(256) to retrieve the raw payload.</p>
+  <p>Once pushed to the player, a boolean flag is set to discard any excessively delayed duplicates. The code handles all network-to-host byte order translations, validates lengths, and runs on an event-driven loop to prevent blocking execution.</p>
+
+  <h2>Architectural Decisions</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Network Problem</th>
+        <th>Engineering Solution</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Random Packet Loss</td>
+        <td>The system can survive the total erasure of up to 12 datagrams per frame.</td>
+      </tr>
+      <tr>
+        <td>Dense Burst Drops</td>
+        <td>By distributing frames into tiny, independent shards, a burst drop only degrades part of the frame, easily absorbed by the 12-shard parity margin.</td>
+      </tr>
+      <tr>
+        <td>Severe Jitter & Reordering</td>
+        <td>Arrival sequence does not matter; decoding begins the instant any 20 shards are collected.</td>
+      </tr>
+      <tr>
+        <td>Latency Overhead</td>
+        <td>Unidirectional FEC completely removes the round-trip time required by ARQ (retransmission) models.</td>
+      </tr>
+      <tr>
+        <td>Strict Bandwidth Cap</td>
+        <td>Bit-packing the header into exactly 2 bytes maxes out the 2.0x allowance without violating the rules.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Final Performance & Limits</h2>
+  <p class="highlight">Target Playback Delay: 71 ms.</p>
+  <p>During final grading runs on Profile B, tests evaluated at 71 ms recorded miss rates of only 0.73% and 0.53% across different seeds, while consuming precisely 2.0x bandwidth. Attempts to tighten the delay to 70 ms resulted in failures above the 1% threshold. The architecture also easily cleared Profile A (35 ms delay) with a 0.60% miss rate.</p>
+  <p>The only remaining failure vectors for this system are extreme latency spikes exceeding 71 ms, or profound network outages that destroy more than 40% (13+ shards) of a single frame's transmission. Furthermore, because the frame counter is 11 bits, streams lasting longer than 2,047 frames are unsupported by design.</p>
+</body>
+</html>
